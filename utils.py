@@ -3,7 +3,7 @@
 """
 Created on Thu Jun 25 00:59:00 2020
 
-@author: ar3fx
+@author: Imaging and Data Science Lab
 """
 
 import numpy as np

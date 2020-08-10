@@ -10,7 +10,6 @@ import numpy as np
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 import numpy.linalg as LA
-import multiprocessing as mp
 
 from support.optrans.continuous import VOT2D
 from support.optrans.utils import signal_to_pdf

@@ -29,6 +29,15 @@ class batch_RCDT:
         self.thetas = thetas
         self.rm_edge = rm_edge
         
+    def forward_seq(self, X, template):
+        self.template = template
+        radoncdt = RadonCDT(self.thetas)
+        x_hat = []
+        for i in range(X.shape[0]):
+            x_hat.append(radoncdt.forward(x0_range, self.template / np.sum(self.template), 
+                                          x_range, X[i,:] / np.sum(X[i,:]), self.rm_edge))
+        return np.asarray(x_hat)
+        
     def forward(self, X, template):
         # X: (n_samples, width, height)
         self.template = template
