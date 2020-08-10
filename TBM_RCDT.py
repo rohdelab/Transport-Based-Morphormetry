@@ -3,7 +3,7 @@
 """
 Created on Tue Aug  4 22:47:30 2020
 
-@author: AHM Rubaiyat, M Shifat-E-Rabbi
+@author: Imaging and Data Science Lab
 """
 
 import numpy as np
