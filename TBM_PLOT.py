@@ -26,212 +26,98 @@ from skimage.measure import regionprops, label
 from numpy import matlib as mb
 import scipy as sc
 
+from skimage.io import imread
+from skimage.color import rgb2gray
+from sklearn.cluster import KMeans
 
-def fromInd2Coord(ind,Ny):
-    coor=np.zeros((2,len(ind)))
-    coor[0,:] = np.fix(ind/Ny)+1
-    coor[1,:] = np.remainder(ind,Ny)
-    return coor
+def gaussian2D(x,mean,sigma):
+    sigma2=sigma**2
+    if len(x.shape)==1:
+        return (1./(2*np.pi*sigma2))*np.exp(-((x-mean)**2).sum()/(2*sigma2))
+    else: 
+        return (1./(2*np.pi*sigma2))*np.exp(-((x-mean)**2).sum(1)/(2*sigma2))
+    
+def particle2image(x,a,sigma,imgshape):
+    '''
+    This function gets a set of coordinates, x, their amplitude, a, and generates a PDF image using a gaussian kernel
+    '''
+    X,Y=np.meshgrid(np.arange(imgshape[0]),np.arange(imgshape[1]))
+    coords=np.stack([X.reshape(-1),Y.reshape(-1)],1)
+    I=np.zeros(imgshape)
+    for i,mean in enumerate(x):
+        I+=a[i]*gaussian2D(coords,mean,sigma).reshape(imgshape)
+    return I.T
 
-def L2_distance(a,b):
-    b=np.reshape(b,(len(b),1))
-    c=a-b
-    nrm=np.zeros(c.shape[1])
-    for i in range(c.shape[1]):
-        tmp=c[:,i]
-        nrm[i]=np.linalg.norm(tmp)
-    return nrm
-    
-def img2pts_Lloyd(img,Nmasses):
-    stopLloyd = 0.5
-    [ny,nx]=np.shape(img)
-    img_t = img/img.max()
-    
-    level = threshold_otsu(img_t)*0.22
-    BW = cv2.threshold(img_t,level,1,cv2.THRESH_BINARY)[1]; BW=BW.astype(bool)
-    BW = morphology.remove_small_objects(BW, min_size=7); BW=BW.astype(int); BW = label(BW); 
-    
-    STATS=regionprops(BW)
-    bb=STATS[0].bbox
-    sy=bb[0]; sx=bb[1]; Ny=bb[2]-sy; Nx=bb[3]-sx    
-    
-    img_t_vec=np.squeeze(np.reshape(img_t,(ny*nx,1),order='F'))
-    img_vec=np.squeeze(np.reshape(img,(ny*nx,1),order='F'))
-    
-    w = np.squeeze(np.argwhere(img_t_vec < level))
-    
-    img_vec[w]=0;
-    img=np.reshape(img_vec,(ny,nx),order='F')
-    
-    ind = np.squeeze(np.argwhere(img_t_vec>=level))
-
-    output_Index = np.random.choice(ind,np.min((Nmasses,len(ind))),replace=False)
-    output_Index=np.sort(output_Index)
-    
-    res_P=fromInd2Coord(output_Index+1,ny)    
-    res_c=res_P[0,:]*0; res_c[:]=1
-
-    BW=img_t*0
-    img_x=img/np.sum(img) 
-    BW[sy-1:sy+Ny,sx-1:sx+Nx] = img_x[sy-1:sy+Ny,sx-1:sx+Nx]
-    
-    BW_vec=np.reshape(BW,(nx*ny,),order='F'); ii=np.squeeze(np.argwhere(BW_vec))
-    V=BW_vec[ii]
-    rc=fromInd2Coord(ii+1,ny) 
-    col=rc[0,:]; row=rc[1,:]
-        
-    tmp_row=np.reshape(row,(1,len(row))); tmp_col=np.reshape(col,(1,len(col)))
-    Pl=np.concatenate((tmp_col,tmp_row),axis=0)
-    
-    if len(ind)<Nmasses:
-        res_P2 = fromInd2Coord(ind,ny)
-        nlz = np.sum(img_vec[ind])
-        res_c2 = img_vec[ind]/nlz
-        var_out = np.zeros((1,len(ind)))
-        llerr = 0
-    else:
-        cur = 0; differ = 1        
-        while differ>stopLloyd:
-            neighbors_map = Pl[0,:]*0
-            for k in range(Pl.shape[1]):
-                Pk = Pl[:,k]; Pk=np.reshape(Pk,(2,1))
-                BP=mb.repmat(Pk,1,res_P.shape[1])
-                err=np.sum((BP-res_P)*(BP-res_P),axis=0); err[np.isnan(err)]=1e6 
-        
-                w=np.argwhere(err==err.min())
-                neighbors_map[k]=w[0]
-            
-            errUB=np.zeros(res_P.shape[1])
-            for k in range(res_P.shape[1]):
-                w=np.argwhere(np.absolute(neighbors_map-k)<0.01)
-                cx = np.sum(V[w]*Pl[0,w])/np.sum(V[w]+1e-10)
-                cy = np.sum(V[w]*Pl[1,w])/np.sum(V[w]+1e-10)
-                tmp_center=np.array([cx,cy]); tmp_center=np.reshape(tmp_center,(2,1))
-                
-                ld=L2_distance(Pl[:,np.squeeze(w)],tmp_center)
-                dist_cent = ld*ld
-
-                t1=np.reshape(V[w],(len(V[w]),)); 
-                t2=np.reshape(dist_cent,(len(dist_cent),));
-
-                if t1.shape[0]==t2.shape[0]:
-                    errUB[k]=t1.dot(t2)
-                else:                          
-                    errUB[k]=np.sum(t1*t2) 
-                
-                res_P[:,k]=np.squeeze(tmp_center)
-                res_c[k]=np.sum(V[w])
-                
-            if cur==0:
-                llerr=np.sum(errUB)
-            else:
-                llerr=np.append(llerr,np.sum(errUB))
-                
-            if cur>=3:
-                differ = (llerr[cur]-llerr[cur-1])/(llerr[cur-1]-llerr[cur-2])
-            else:
-                differ=1
-                
-            cur=cur+1
-        
-        vari=np.zeros(res_P.shape[1])
-        for k in range(res_P.shape[1]):
-            w=np.argwhere(np.absolute(neighbors_map-k)<0.01)
-            w=np.reshape(w,(len(w),))
-            temp = Pl[:,w]-mb.repmat(np.reshape(res_P[:,k],(2,1)),1,len(w))
-            vari[k]=np.std(np.diag(temp.T.dot(temp)))
-            
-        eps=1e-10
-        w=np.argwhere(res_c<eps)
-        # res_c=np.delete(res_c,w) # ? # ?
-        var_out=vari
-        # ?
-        res_c=res_c/np.sum(res_c)
-        res_P2=res_P.T
-        res_c2=res_c
-
-    return (res_P2,res_c2)
+def get_particles(img,N):
+    thresh=.01 # If you want to discard low intensity values, otherwise set it to zero
+    xfull=np.argwhere(img>thresh)
+    features= np.concatenate([xfull,img[xfull[:,0],xfull[:,1]][:,np.newaxis]],1)
+    kmeans=KMeans(n_clusters=N)
+    kmeans.fit(features)
+    x=kmeans.cluster_centers_
+    return x
 
 def particleApproximation(imgs,Nmasses):
-    Pl=list(); P=list()
+    PPl=list();
     for i in range(imgs.shape[0]):
-        (Pl_t,P_t)=img2pts_Lloyd(imgs[i],Nmasses)
-        Pl.append(Pl_t); P.append(P_t);
-    return (Pl,P)
+        img=imgs[i]
+        x=get_particles(img,Nmasses)
+        PPl.append(x);
+    return PPl
 
-def sub2ind(array_shape, rows, cols):
-    return (cols-1)*array_shape[1] + rows-1
-
-def Visualize_LOT(Data,Intensity,Nx,Ny,scale):
-    NG=35
-    I1=np.zeros((scale*Nx,scale*Ny))
-    loc=scale*np.round(np.reshape(Data,(int(len(Data)/2),2),order='F'))
-
-    linearind=sub2ind(np.shape(I1),loc[:,1],loc[:,0])
-    linearind=linearind.astype(int)
+def pLOT_single(x_temp,x_targ,a_temp,a_targ):
+    C=ot.dist(x_targ,x_temp)
+    w2,log=ot.emd2(a_targ,a_temp,C,return_matrix=True)
+    M=x_targ.shape[0]
+    gamma=log['G']
+    gamma2=np.array([g/(g.sum()) for g in gamma.T]).T
     
-    i1=np.squeeze(np.reshape(I1,(scale*Nx*scale*Ny,1),order='F'))
-    i1[linearind]=Intensity
-    I1=np.reshape(i1,(scale*Nx,scale*Ny),order='F')
-        
-    h1 = sc.signal.gaussian(NG*scale,std=7); h1=np.reshape(h1,(len(h1),1),order='F')
-    h=h1.dot(h1.T); h=h/np.sum(h)
-    
-    I1=sc.ndimage.convolve(I1,h,mode='constant') 
-    I1=I1-I1.min(); I1=I1/I1.max(); #I1=np.flipud(np.fliplr(I1))
-    
-    return I1
-
-
+    #V=np.matmul(gamma2.T,x_targ)-x_temp
+    V=np.matmul(gamma2.T,x_targ)
+    return V
 
 class batch_PLOT:
     def __init__(self, Nmasses=50):
         self.Nmasses = Nmasses
         
-    def forward_seq(self, x_train, x_test):
+    def forward_seq(self, x_train, x_test, x_template):
         N = self.Nmasses
-        (Pl_train,P_train)=particleApproximation(x_train, N)
-        (Pl_test,P_test)=particleApproximation(x_test,N)
+        PPl_train=particleApproximation(x_train, N)
+        PPl_test=particleApproximation(x_test,N)
         
-        Pl_tem=0
-        for a in range(2):#x_train.shape[0]):
-            t=Pl_train[a]
-            Pl_tem=Pl_tem+t
-        Pl_tem=Pl_tem/2#x_train.shape[0]
-        P_tem = np.ones((N,))/float(N)
+        #x0=np.mean(x_train,axis=0)
+        PPl_tem=get_particles(x_template,N)
         
-        Pl_tem_vec=np.reshape(Pl_tem,(Pl_tem.shape[0]*Pl_tem.shape[1],),order='F')
-
+        x_temp=PPl_tem[:,:2]
+        a_temp=PPl_tem[:,2]/PPl_tem[:,2].sum()
+        
         V=list(); M=x_train.shape[0]
         for ind in range(M):
-            Ni=Pl_train[ind].shape[0]
-            C=ot.dist(Pl_train[ind],Pl_tem)
-            b=P_tem # b=np.ones((N,))/float(N)
-            a=P_train[ind] # a=np.ones((Ni,))/float(Ni)    
-            p=ot.emd(a,b,C) # exact linear program
-            V.append(np.matmul((N*p).T,Pl_train[ind])-Pl_tem)
+            xa_tr=PPl_train[ind]
+            x_tr=xa_tr[:,:2]
+            a_tr=xa_tr[:,2]/xa_tr[:,2].sum()
+            V_single=pLOT_single(x_temp,x_tr,a_temp,a_tr)
+            V.append(V_single)
         V=np.asarray(V)
         
         x_train_hat=np.zeros((len(V),V[0].shape[0]*V[0].shape[1]))
         for a in range(len(V)):
-            x_train_hat[0,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
+            x_train_hat[a,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
             
         V=list(); M=x_test.shape[0]
         for ind in range(M):
-            Ni=Pl_test[ind].shape[0]
-            C=ot.dist(Pl_test[ind],Pl_tem)
-            b=P_tem # b=np.ones((N,))/float(N)
-            a=P_test[ind] # a=np.ones((Ni,))/float(Ni)
-            p=ot.emd(a,b,C) # exact linear program
-            V.append(np.matmul((N*p).T,Pl_test[ind])-Pl_tem)
+            xa_te=PPl_test[ind]
+            x_te=xa_te[:,:2]
+            a_te=xa_te[:,2]/xa_te[:,2].sum()
+            V_single=pLOT_single(x_temp,x_te,a_temp,a_te)
+            V.append(V_single)
         V=np.asarray(V)
         
         x_test_hat=np.zeros((len(V),V[0].shape[0]*V[0].shape[1]))
         for a in range(len(V)):
-            x_test_hat[0,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
+            x_test_hat[a,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
             
-        return x_train_hat, x_test_hat, Pl_tem_vec, P_tem
-    
+        return x_train_hat, x_test_hat, x_temp, a_temp
     
 class PLOT_PCA:
     def __init__(self, n_components=2):
@@ -247,8 +133,8 @@ class PLOT_PCA:
         
         self.mean_tr=np.mean(x_train_hat, axis=0)
         self.mean_te=np.mean(x_test_hat, axis=0)
-        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1)
-        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1)
+        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1,order='F')
+        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1,order='F')
         
         pca=PCA(n_components=self.n_components)
         self.pca_proj_tr = pca.fit_transform(x_train_hat_vec)
@@ -258,7 +144,7 @@ class PLOT_PCA:
         
         return self.basis_hat, self.pca_proj_tr, self.pca_proj_te
     
-    def visualize(self, Pl_tem_vec, Intensity, directions=5, points=5, SD_spread=1):
+    def visualize(self, mean_x_train_hat, Intensity, directions=5, points=5, SD_spread=2):
         dir_num=directions
         gI_num=points
         b_hat = self.basis_hat
@@ -273,8 +159,11 @@ class PLOT_PCA:
             lamb=np.linspace(-SD_spread*np.std(pca_proj[:,a]),SD_spread*np.std(pca_proj[:,a]), num=gI_num)
             mode_var_recon = np.zeros([gI_num,self.R,self.C])
             for b in range(gI_num):
-                mode_var=Pl_tem_vec+self.mean_tr+lamb[b]*pca_dirs[a,:];
-                mode_var_recon[b,:]=Visualize_LOT(mode_var,Intensity,self.R,self.C,scale=1)
+
+                mode_var=mean_x_train_hat+lamb[b]*pca_dirs[a,:];
+                mode_var=mode_var.reshape(int(len(mode_var)/2),-1,order='F')
+                mode_var_recon[b,:]=particle2image(mode_var,Intensity,3,(self.R,self.C))
+                
                 t=mode_var_recon[b]
                 t=t-np.min(t); t=t/np.max(t)
                 mode_var_recon[b]=t
@@ -403,14 +292,14 @@ class PLOT_PLDA:
         
         self.mean_tr=np.mean(x_train_hat, axis=0)
         self.mean_te=np.mean(x_test_hat, axis=0)
-        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1)
-        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1)
+        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1,order='F')
+        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1,order='F')
         
         pca=PCA()
         x_train_hat_vec_pca = pca.fit_transform(x_train_hat_vec) 
         x_test_hat_vec_pca = pca.transform(x_test_hat_vec)
         
-        plda=PLDA(alpha=.001,n_components=self.n_components)
+        plda=PLDA(alpha=1.618,n_components=self.n_components)
 
         self.plda_proj_tr = plda.fit_transform(x_train_hat_vec_pca,y_train);
         self.plda_proj_te = plda.transform(x_test_hat_vec_pca);
@@ -419,7 +308,7 @@ class PLOT_PLDA:
         
         return self.basis_hat, self.plda_proj_tr, self.plda_proj_te
     
-    def visualize(self, Pl_tem_vec, Intensity, directions=5, points=5, SD_spread=1):
+    def visualize(self, mean_x_train_hat, Intensity, directions=5, points=5, SD_spread=2):
         dir_num=directions
         gI_num=points
         b_hat = self.basis_hat
@@ -434,8 +323,11 @@ class PLOT_PLDA:
             lamb=np.linspace(-SD_spread*np.std(plda_proj[:,a]),SD_spread*np.std(plda_proj[:,a]), num=gI_num)
             mode_var_recon = np.zeros([gI_num,self.R,self.C])
             for b in range(gI_num):
-                mode_var=Pl_tem_vec+self.mean_tr+lamb[b]*plda_dirs[a,:];
-                mode_var_recon[b,:]=Visualize_LOT(mode_var,Intensity,self.R,self.C,scale=1)
+
+                mode_var=mean_x_train_hat+lamb[b]*plda_dirs[a,:];
+                mode_var=mode_var.reshape(int(len(mode_var)/2),-1,order='F')
+                mode_var_recon[b,:]=particle2image(mode_var,Intensity,3,(self.R,self.C))
+                
                 t=mode_var_recon[b]
                 t=t-np.min(t); t=t/np.max(t)
                 mode_var_recon[b]=t
@@ -563,8 +455,8 @@ class PLOT_CCA:
         
         self.mean_tr=np.mean(x_train_hat, axis=0)
         self.mean_te=np.mean(x_test_hat, axis=0)
-        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1)
-        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1)
+        x_train_hat_vec=(x_train_hat - self.mean_tr).reshape(self.Ntr,-1,order='F')
+        x_test_hat_vec=(x_test_hat - self.mean_tr).reshape(self.Nte,-1,order='F')
         
         pca=PCA()
         x_train_hat_vec_pca = pca.fit_transform(x_train_hat_vec) 
@@ -584,7 +476,7 @@ class PLOT_CCA:
         self.basis_hat2=np.reshape(b_hat2,(n_components,self.Ptr))
         return self.basis_hat1, self.basis_hat2, self.cca_proj_tr1,self.cca_proj_tr2, self.cca_proj_te1,self.cca_proj_te2
     
-    def visualize(self, Pl_tem_vec, Intensity, directions=5, points=5, SD_spread=1):
+    def visualize(self, mean_x_train_hat, Intensity, directions=5, points=5, SD_spread=1):
         dir_num=directions
         gI_num=points
         b_hat1 = self.basis_hat1
@@ -608,10 +500,17 @@ class PLOT_CCA:
             mode_var_recon1 = np.zeros([gI_num,self.R,self.C])
             mode_var_recon2 = np.zeros([gI_num,self.R,self.C])
             for b in range(gI_num):
-                mode_var1=Pl_tem_vec+self.mean_tr+lamb1[b]*cca_dirs1[a,:]
-                mode_var2=Pl_tem_vec+self.mean_tr+lamb2[b]*cca_dirs2[a,:]
-                mode_var_recon1[b,:]=Visualize_LOT(mode_var1,Intensity,self.R,self.C,scale=1)
-                mode_var_recon2[b,:]=Visualize_LOT(mode_var2,Intensity,self.R,self.C,scale=1)
+                #mode_var1=Pl_tem_vec+self.mean_tr+lamb1[b]*cca_dirs1[a,:]
+                #mode_var2=Pl_tem_vec+self.mean_tr+lamb2[b]*cca_dirs2[a,:]
+                #mode_var_recon1[b,:]=Visualize_LOT(mode_var1,Intensity,self.R,self.C,scale=1)
+                #mode_var_recon2[b,:]=Visualize_LOT(mode_var2,Intensity,self.R,self.C,scale=1)
+                mode_var1=mean_x_train_hat+lamb1[b]*cca_dirs1[a,:]
+                mode_var1=mode_var1.reshape(int(len(mode_var1)/2),-1,order='F')
+                mode_var_recon1[b,:]=particle2image(mode_var1,Intensity,3,(self.R,self.C))
+                mode_var2=mean_x_train_hat+lamb2[b]*cca_dirs2[a,:]
+                mode_var2=mode_var2.reshape(int(len(mode_var2)/2),-1,order='F')
+                mode_var_recon2[b,:]=particle2image(mode_var2,Intensity,3,(self.R,self.C))
+                
                 t1=mode_var_recon1[b]; t2=mode_var_recon2[b]
                 t1=t1-np.min(t1); t1=t1/np.max(t1)
                 t2=t2-np.min(t2); t2=t2/np.max(t2)
@@ -857,3 +756,215 @@ class PLOT_NS_Classifier:
         
     def score(self, y_test):
         return accuracy_score(y_test, self.preds_label)
+    
+    
+## ------------ PAST CODES FROM HERE ------------------------
+
+def fromInd2Coord(ind,Ny):
+    coor=np.zeros((2,len(ind)))
+    coor[0,:] = np.fix(ind/Ny)+1
+    coor[1,:] = np.remainder(ind,Ny)
+    return coor
+
+def L2_distance(a,b):
+    b=np.reshape(b,(len(b),1))
+    c=a-b
+    nrm=np.zeros(c.shape[1])
+    for i in range(c.shape[1]):
+        tmp=c[:,i]
+        nrm[i]=np.linalg.norm(tmp)
+    return nrm
+    
+def img2pts_Lloyd(img,Nmasses):
+    stopLloyd = 0.5
+    [ny,nx]=np.shape(img)
+    img_t = img/img.max()
+    
+    level = threshold_otsu(img_t)*0.22
+    BW = cv2.threshold(img_t,level,1,cv2.THRESH_BINARY)[1]; BW=BW.astype(bool)
+    BW = morphology.remove_small_objects(BW, min_size=7); BW=BW.astype(int); BW = label(BW); 
+    
+    STATS=regionprops(BW)
+    bb=STATS[0].bbox
+    sy=bb[0]; sx=bb[1]; Ny=bb[2]-sy; Nx=bb[3]-sx    
+    
+    img_t_vec=np.squeeze(np.reshape(img_t,(ny*nx,1),order='F'))
+    img_vec=np.squeeze(np.reshape(img,(ny*nx,1),order='F'))
+    
+    w = np.squeeze(np.argwhere(img_t_vec < level))
+    
+    img_vec[w]=0;
+    img=np.reshape(img_vec,(ny,nx),order='F')
+    
+    ind = np.squeeze(np.argwhere(img_t_vec>=level))
+
+    output_Index = np.random.choice(ind,np.min((Nmasses,len(ind))),replace=False)
+    output_Index=np.sort(output_Index)
+    
+    res_P=fromInd2Coord(output_Index+1,ny)    
+    res_c=res_P[0,:]*0; res_c[:]=1
+
+    BW=img_t*0
+    img_x=img/np.sum(img) 
+    BW[sy-1:sy+Ny,sx-1:sx+Nx] = img_x[sy-1:sy+Ny,sx-1:sx+Nx]
+    
+    BW_vec=np.reshape(BW,(nx*ny,),order='F'); ii=np.squeeze(np.argwhere(BW_vec))
+    V=BW_vec[ii]
+    rc=fromInd2Coord(ii+1,ny) 
+    col=rc[0,:]; row=rc[1,:]
+        
+    tmp_row=np.reshape(row,(1,len(row))); tmp_col=np.reshape(col,(1,len(col)))
+    Pl=np.concatenate((tmp_col,tmp_row),axis=0)
+    
+    if len(ind)<Nmasses:
+        res_P2 = fromInd2Coord(ind,ny)
+        nlz = np.sum(img_vec[ind])
+        res_c2 = img_vec[ind]/nlz
+        var_out = np.zeros((1,len(ind)))
+        llerr = 0
+    else:
+        cur = 0; differ = 1        
+        while differ>stopLloyd:
+            neighbors_map = Pl[0,:]*0
+            for k in range(Pl.shape[1]):
+                Pk = Pl[:,k]; Pk=np.reshape(Pk,(2,1))
+                BP=mb.repmat(Pk,1,res_P.shape[1])
+                err=np.sum((BP-res_P)*(BP-res_P),axis=0); err[np.isnan(err)]=1e6 
+        
+                w=np.argwhere(err==err.min())
+                neighbors_map[k]=w[0]
+            
+            errUB=np.zeros(res_P.shape[1])
+            for k in range(res_P.shape[1]):
+                w=np.argwhere(np.absolute(neighbors_map-k)<0.01)
+                cx = np.sum(V[w]*Pl[0,w])/np.sum(V[w]+1e-10)
+                cy = np.sum(V[w]*Pl[1,w])/np.sum(V[w]+1e-10)
+                tmp_center=np.array([cx,cy]); tmp_center=np.reshape(tmp_center,(2,1))
+                
+                ld=L2_distance(Pl[:,np.squeeze(w)],tmp_center)
+                dist_cent = ld*ld
+
+                t1=np.reshape(V[w],(len(V[w]),)); 
+                t2=np.reshape(dist_cent,(len(dist_cent),));
+
+                if t1.shape[0]==t2.shape[0]:
+                    errUB[k]=t1.dot(t2)
+                else:                          
+                    errUB[k]=np.sum(t1*t2) 
+                
+                res_P[:,k]=np.squeeze(tmp_center)
+                res_c[k]=np.sum(V[w])
+                
+            if cur==0:
+                llerr=np.sum(errUB)
+            else:
+                llerr=np.append(llerr,np.sum(errUB))
+                
+            if cur>=3:
+                differ = (llerr[cur]-llerr[cur-1])/(llerr[cur-1]-llerr[cur-2])
+            else:
+                differ=1
+                
+            cur=cur+1
+        
+        vari=np.zeros(res_P.shape[1])
+        for k in range(res_P.shape[1]):
+            w=np.argwhere(np.absolute(neighbors_map-k)<0.01)
+            w=np.reshape(w,(len(w),))
+            temp = Pl[:,w]-mb.repmat(np.reshape(res_P[:,k],(2,1)),1,len(w))
+            vari[k]=np.std(np.diag(temp.T.dot(temp)))
+            
+        eps=1e-10
+        w=np.argwhere(res_c<eps)
+        # res_c=np.delete(res_c,w) # ? # ?
+        var_out=vari
+        # ?
+        res_c=res_c/np.sum(res_c)
+        res_P2=res_P.T
+        res_c2=res_c
+
+    return (res_P2,res_c2)
+
+def particleApproximation_v0(imgs,Nmasses):
+    Pl=list(); P=list()
+    for i in range(imgs.shape[0]):
+        (Pl_t,P_t)=img2pts_Lloyd(imgs[i],Nmasses)
+        Pl.append(Pl_t); P.append(P_t);
+    return (Pl,P)
+
+def sub2ind(array_shape, rows, cols):
+    return (cols-1)*array_shape[1] + rows-1
+
+def Visualize_LOT(Data,Intensity,Nx,Ny,scale):
+    NG=35
+    I1=np.zeros((scale*Nx,scale*Ny))
+    loc=scale*np.round(np.reshape(Data,(int(len(Data)/2),2),order='F'))
+
+    linearind=sub2ind(np.shape(I1),loc[:,0],loc[:,1])
+    linearind=linearind.astype(int)
+    
+    i1=np.squeeze(np.reshape(I1,(scale*Nx*scale*Ny,1),order='F'))
+    i1[linearind]=Intensity
+    I1=np.reshape(i1,(scale*Nx,scale*Ny),order='F')
+        
+    h1 = sc.signal.gaussian(NG*scale,std=7); h1=np.reshape(h1,(len(h1),1),order='F')
+    h=h1.dot(h1.T); h=h/np.sum(h)
+    
+    I1=sc.ndimage.convolve(I1,h,mode='constant') 
+    I1=I1-I1.min(); I1=I1/I1.max(); #I1=np.flipud(np.fliplr(I1))
+    
+    return I1
+
+class batch_PLOT_v0:
+    def __init__(self, Nmasses=50):
+        self.Nmasses = Nmasses
+        
+    def forward_seq(self, x_train, x_test):
+        N = self.Nmasses
+        (Pl_train,P_train)=particleApproximation_v0(x_train, N)
+        (Pl_test,P_test)=particleApproximation_v0(x_test,N)
+        
+        Pl_tem=0
+        for a in range(2):#x_train.shape[0]):
+            t=Pl_train[a]
+            Pl_tem=Pl_tem+t
+        Pl_tem=Pl_tem/2#x_train.shape[0]
+        P_tem = np.ones((N,))/float(N)
+        
+        #Pl_tem_vec=np.reshape(Pl_tem,(Pl_tem.shape[0]*Pl_tem.shape[1],),order='F')
+        
+        V=list(); M=x_train.shape[0]
+        for ind in range(M):
+            Ni=Pl_train[ind].shape[0]
+            C=ot.dist(Pl_train[ind],Pl_tem)
+            b=P_tem # b=np.ones((N,))/float(N)
+            a=P_train[ind] # a=np.ones((Ni,))/float(Ni)    
+            p=ot.emd(a,b,C) # exact linear program
+            
+            #V.append(np.matmul((N*p).T,Pl_train[ind])-Pl_tem)
+            V.append(np.matmul((N*p).T,Pl_train[ind])+Pl_tem) # already giving transport displacement?
+            
+        V=np.asarray(V)
+        
+        x_train_hat=np.zeros((len(V),V[0].shape[0]*V[0].shape[1]))
+        for a in range(len(V)):
+            x_train_hat[a,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
+            
+        V=list(); M=x_test.shape[0]
+        for ind in range(M):
+            Ni=Pl_test[ind].shape[0]
+            C=ot.dist(Pl_test[ind],Pl_tem)
+            b=P_tem # b=np.ones((N,))/float(N)
+            a=P_test[ind] # a=np.ones((Ni,))/float(Ni)
+            p=ot.emd(a,b,C) # exact linear program
+            
+            #V.append(np.matmul((N*p).T,Pl_test[ind])-Pl_tem)
+            V.append(np.matmul((N*p).T,Pl_test[ind])+Pl_tem)
+            
+        V=np.asarray(V)
+        
+        x_test_hat=np.zeros((len(V),V[0].shape[0]*V[0].shape[1]))
+        for a in range(len(V)):
+            x_test_hat[a,:]=np.reshape(V[a],(V[0].shape[0]*V[0].shape[1],),order='F')
+            
+        return x_train_hat, x_test_hat, Pl_tem, P_tem
